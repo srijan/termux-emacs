@@ -1,0 +1,253 @@
+name: Sync Termux APKs
+
+on:
+  schedule:
+    # Weekly on Sundays at midnight UTC
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+    inputs:
+      repo_filter:
+        description: 'Filter to specific repo (e.g., termux-app, termux-api). Leave empty for all.'
+        required: false
+        default: ''
+      force:
+        description: 'Force reprocess even if release exists'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  KEYSTORE_PATH: keys/emacs.keystore
+  KEYSTORE_PASSWORD: emacs
+  KEY_ALIAS: emacs
+
+jobs:
+  check-releases:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.check.outputs.matrix }}
+      has_updates: ${{ steps.check.outputs.has_updates }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for new releases
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_FILTER: ${{ inputs.repo_filter }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          repos=(
+            "termux/termux-app"
+            "termux/termux-api"
+            "termux/termux-boot"
+            "termux/termux-float"
+            "termux/termux-styling"
+            "termux/termux-widget"
+            "termux/termux-x11"
+          )
+
+          updates=()
+
+          for repo in "${repos[@]}"; do
+            repo_name=$(basename "$repo")
+
+            # Apply filter if specified
+            if [[ -n "$REPO_FILTER" && "$repo_name" != *"$REPO_FILTER"* ]]; then
+              echo "Skipping $repo_name (filtered)"
+              continue
+            fi
+
+            echo "Checking $repo..."
+
+            # Get latest release from upstream
+            release_info=$(gh api "repos/$repo/releases/latest" 2>/dev/null || echo "null")
+
+            if [[ "$release_info" == "null" ]]; then
+              echo "  No releases found for $repo"
+              continue
+            fi
+
+            tag=$(echo "$release_info" | jq -r '.tag_name')
+            release_id=$(echo "$release_info" | jq -r '.id')
+
+            if [[ "$tag" == "null" || -z "$tag" ]]; then
+              echo "  No tag found for $repo"
+              continue
+            fi
+
+            # Check if we have APKs in this release
+            apk_count=$(echo "$release_info" | jq '[.assets[] | select(.name | endswith(".apk"))] | length')
+            if [[ "$apk_count" == "0" ]]; then
+              echo "  No APKs in release $tag"
+              continue
+            fi
+
+            # Our tag format: {repo-name}-{upstream-tag}
+            our_tag="${repo_name}-${tag}"
+
+            # Check if we already have this release
+            if git tag -l "$our_tag" | grep -q "$our_tag"; then
+              if [[ "$FORCE" != "true" ]]; then
+                echo "  Already have $our_tag"
+                continue
+              fi
+              echo "  Force reprocessing $our_tag"
+            fi
+
+            echo "  New release found: $tag ($apk_count APKs)"
+            updates+=("{\"repo\":\"$repo\",\"repo_name\":\"$repo_name\",\"tag\":\"$tag\",\"our_tag\":\"$our_tag\",\"release_id\":\"$release_id\"}")
+          done
+
+          if [[ ${#updates[@]} -eq 0 ]]; then
+            echo "No updates found"
+            echo "has_updates=false" >> $GITHUB_OUTPUT
+            echo "matrix={\"include\":[]}" >> $GITHUB_OUTPUT
+          else
+            echo "Found ${#updates[@]} updates"
+            echo "has_updates=true" >> $GITHUB_OUTPUT
+            matrix=$(printf '%s\n' "${updates[@]}" | jq -s '{include: .}' -c)
+            echo "matrix=$matrix" >> $GITHUB_OUTPUT
+          fi
+
+  process-release:
+    needs: check-releases
+    if: needs.check-releases.outputs.has_updates == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.check-releases.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Download upstream release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p downloads
+          cd downloads
+
+          echo "Downloading APKs from ${{ matrix.repo }} release ${{ matrix.tag }}..."
+
+          # Get release assets
+          assets=$(gh api "repos/${{ matrix.repo }}/releases/tags/${{ matrix.tag }}" | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url')
+
+          for url in $assets; do
+            filename=$(basename "$url")
+            echo "Downloading $filename..."
+            curl -L -o "$filename" "$url"
+          done
+
+          # Also download checksums if available
+          checksums_url=$(gh api "repos/${{ matrix.repo }}/releases/tags/${{ matrix.tag }}" | jq -r '.assets[] | select(.name | contains("sha256") or contains("checksum")) | .browser_download_url' | head -1)
+          if [[ -n "$checksums_url" && "$checksums_url" != "null" ]]; then
+            echo "Downloading checksums..."
+            curl -L -o "checksums-upstream.txt" "$checksums_url"
+          fi
+
+          ls -la
+
+      - name: Resign APKs
+        run: |
+          mkdir -p resigned
+
+          for apk in downloads/*.apk; do
+            if [[ ! -f "$apk" ]]; then
+              continue
+            fi
+
+            filename=$(basename "$apk")
+            echo "Processing $filename..."
+
+            # Copy APK to working directory
+            cp "$apk" "resigned/$filename"
+            workfile="resigned/$filename"
+
+            # Remove existing signature
+            echo "  Removing existing signature..."
+            zip -d "$workfile" "META-INF/*" 2>/dev/null || true
+
+            # Align the APK
+            echo "  Aligning..."
+            zipalign -f 4 "$workfile" "${workfile}.aligned"
+            mv "${workfile}.aligned" "$workfile"
+
+            # Sign with Emacs keystore
+            echo "  Signing..."
+            apksigner sign \
+              --ks "${{ env.KEYSTORE_PATH }}" \
+              --ks-pass "pass:${{ env.KEYSTORE_PASSWORD }}" \
+              --ks-key-alias "${{ env.KEY_ALIAS }}" \
+              --key-pass "pass:${{ env.KEYSTORE_PASSWORD }}" \
+              "$workfile"
+
+            # Verify signature
+            echo "  Verifying..."
+            apksigner verify "$workfile"
+
+            echo "  Done: $filename"
+          done
+
+          ls -la resigned/
+
+      - name: Generate checksums
+        run: |
+          cd resigned
+          sha256sum *.apk > checksums-sha256.txt
+          cat checksums-sha256.txt
+
+      - name: Get upstream release notes
+        id: release_notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          body=$(gh api "repos/${{ matrix.repo }}/releases/tags/${{ matrix.tag }}" | jq -r '.body // ""')
+
+          # Create release notes
+          cat > release_notes.md << 'NOTES_EOF'
+          ## Resigned APKs from ${{ matrix.repo }}
+
+          Original release: [${{ matrix.tag }}](https://github.com/${{ matrix.repo }}/releases/tag/${{ matrix.tag }})
+
+          These APKs have been resigned with the [Emacs Android keystore](https://cgit.git.savannah.gnu.org/cgit/emacs.git/plain/java/emacs.keystore) for compatibility with Emacs on Android.
+
+          ---
+
+          ### Original Release Notes
+
+          NOTES_EOF
+
+          echo "$body" >> release_notes.md
+
+      - name: Delete existing release if force
+        if: inputs.force == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete "${{ matrix.our_tag }}" --yes || true
+          git push --delete origin "${{ matrix.our_tag }}" || true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ matrix.our_tag }}" \
+            --title "${{ matrix.repo_name }} ${{ matrix.tag }} (Emacs-signed)" \
+            --notes-file release_notes.md \
+            resigned/*.apk \
+            resigned/checksums-sha256.txt
