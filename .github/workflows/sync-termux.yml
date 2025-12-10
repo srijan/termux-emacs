@@ -21,6 +21,9 @@ env:
   KEYSTORE_PASSWORD: emacs1
   KEY_ALIAS: Emacs keystore
 
+permissions:
+  contents: write
+
 jobs:
   check-releases:
     runs-on: ubuntu-latest
