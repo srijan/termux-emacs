@@ -18,8 +18,8 @@ on:
 
 env:
   KEYSTORE_PATH: keys/emacs.keystore
-  KEYSTORE_PASSWORD: emacs
-  KEY_ALIAS: emacs
+  KEYSTORE_PASSWORD: emacs1
+  KEY_ALIAS: Emacs keystore
 
 jobs:
   check-releases:

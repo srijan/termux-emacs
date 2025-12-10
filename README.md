@@ -43,7 +43,8 @@ Releases are tagged as `{app}-{version}`:
 APKs are signed with the public Emacs debug keystore:
 - **Keystore:** [`keys/emacs.keystore`](keys/emacs.keystore)
 - **Source:** [cgit.git.savannah.gnu.org](https://cgit.git.savannah.gnu.org/cgit/emacs.git/plain/java/emacs.keystore)
-- **Password:** `emacs`
+- **Password:** `emacs1`
+- **Key alias:** `Emacs keystore`
 
 ## License
 
