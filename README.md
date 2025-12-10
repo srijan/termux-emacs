@@ -16,7 +16,6 @@ Emacs for Android uses a specific signing key. To install Termux alongside Emacs
 | Termux:Float | [termux/termux-float](https://github.com/termux/termux-float) |
 | Termux:Styling | [termux/termux-styling](https://github.com/termux/termux-styling) |
 | Termux:Widget | [termux/termux-widget](https://github.com/termux/termux-widget) |
-| Termux:X11 | [termux/termux-x11](https://github.com/termux/termux-x11) |
 
 ## Installation
 
@@ -38,7 +37,6 @@ A GitHub Actions workflow runs weekly to:
 Releases are tagged as `{app}-{version}`:
 - `termux-app-v0.118.3`
 - `termux-api-v0.53.0`
-- `termux-x11-nightly-20251130`
 
 ## Signing Key
 

@@ -47,7 +47,6 @@ jobs:
             "termux/termux-float"
             "termux/termux-styling"
             "termux/termux-widget"
-            "termux/termux-x11"
           )
 
           updates=()
